@@ -37,3 +37,4 @@ Thumbs.db
 *.wav
 *.mp3
 *.onnx
+cusparselt-local-tegra-repo-ubuntu2204-0.8.1_0.8.1-1_arm64.deb
