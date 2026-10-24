@@ -45,6 +45,15 @@ last_face_features = []
 # Protect data accessed by the camera and voice threads.
 state_lock = threading.Lock()
 
+# Signals the camera thread to stop.
+camera_stop_event = threading.Event()
+
+
+def stop_face_detection():
+    """Request a clean shutdown of the camera thread."""
+    camera_stop_event.set()
+    print("[FRIDAY] Camera shutdown requested.")
+
 # Registration synchronization.
 registration_lock = threading.Lock()
 registration_event = threading.Event()
@@ -190,16 +199,6 @@ def identify_face(feature, recognizer):
     return "Unknown", best_similarity
 
 def register_person_by_name(name, timeout=10):
-    """
-    Request registration of the currently visible face.
-
-    Registration succeeds only when exactly one face is visible.
-
-    Returns:
-        (True, name) on success
-        (False, error_message) on failure
-    """
-
     global registration_request
     global registration_result
 
@@ -244,8 +243,6 @@ def register_person_by_name(name, timeout=10):
 
 
 def process_registration(current_features):
-    """Process a pending registration request using the current frame."""
-
     global registration_request
     global registration_result
 
@@ -295,46 +292,16 @@ def process_registration(current_features):
     print(f"[FRIDAY] Registered {requested_name}.")
 
 def get_face_count():
-    """Return the number of faces in the latest processed frame."""
-
     with state_lock:
         return face_count
 
 
 def get_recognized_people():
-    """
-    Return a list of names for backward compatibility.
-
-    Example:
-        ["Luka", "Unknown"]
-    """
-
     with state_lock:
         return recognized_people.copy()
 
 
 def get_face_results():
-    """
-    Return detailed results for every face in the latest frame.
-
-    Example:
-        [
-            {
-                "name": "Luka",
-                "recognized": True,
-                "similarity": 0.61,
-                "bbox": (20, 30, 100, 100)
-            },
-            {
-                "name": "Unknown",
-                "recognized": False,
-                "similarity": 0.22,
-                "bbox": (200, 30, 100, 100)
-            }
-        ]
-
-    Similarity is a matching score, not a probability.
-    """
 
     with state_lock:
         return [
@@ -343,12 +310,6 @@ def get_face_results():
         ]
 
 def start_face_detection():
-    """
-    Run face detection and recognition continuously without a GUI.
-
-    No windows are created. Safe to run over SSH.
-    """
-
     global face_count
     global recognized_people
     global face_results
@@ -375,14 +336,20 @@ def start_face_detection():
     print("Voice registration is enabled.")
     print("===================================\n")
 
+    camera_stop_event.clear()
+
     try:
-        while True:
+        while not camera_stop_event.is_set():
 
             ret, frame = cap.read()
 
+            # Stop promptly if shutdown was requested during capture.
+            if camera_stop_event.is_set():
+                break
+
             if not ret:
                 print(
-                    "[FRIDAY] Warning: Could not read camera frame."
+                    "\n[FRIDAY] Warning: Could not read camera frame."
                 )
                 time.sleep(0.1)
                 continue
@@ -477,8 +444,17 @@ def start_face_detection():
         print(f"\n[FRIDAY] Camera error: {error}")
 
     finally:
+        camera_stop_event.set()
+
         cap.release()
+
+        with state_lock:
+            face_count = 0
+            recognized_people = []
+            face_results = []
+            last_face_features = []
+
         print("\n[FRIDAY] Vision system stopped.")
-        
+
 if __name__ == "__main__":
     start_face_detection()

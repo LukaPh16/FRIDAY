@@ -27,6 +27,7 @@ import requests
 
 from camera import (
     start_face_detection,
+    stop_face_detection,
     get_face_count,
     get_recognized_people,
     get_face_results,
@@ -214,11 +215,16 @@ class TTSEngine:
 
         global tts_playing
 
-        while self.running:
+        while True:
 
             text, done = self.queue.get()
 
             try:
+
+                # Shutdown signal
+                if text is None:
+                    done.set()
+                    return
 
                 buffer = io.BytesIO()
 
@@ -249,8 +255,6 @@ class TTSEngine:
 
                     time.sleep(0.01)
 
-                tts_playing = False
-
             except Exception as e:
 
                 print("[FRIDAY] TTS error:", e)
@@ -262,9 +266,94 @@ class TTSEngine:
                 done.set()
 
                 self.queue.task_done()
+    
+    def shutdown(self):
 
+        self.running = False
+
+        done = Event()
+
+        self.queue.put((None, done))
+
+        done.wait(timeout=3)
+
+        self.thread.join(timeout=3)
+
+        print("[FRIDAY] TTS worker stopped.")
 
 tts = TTSEngine(voice)
+
+def cleanup():
+
+    global camera_thread
+
+    print("\n[FRIDAY] Cleaning up resources...")
+
+    # 1. Stop the camera thread.
+    try:
+        stop_face_detection()
+
+        if (
+            camera_thread is not None
+            and camera_thread.is_alive()
+        ):
+            camera_thread.join(timeout=3)
+
+            if camera_thread.is_alive():
+                print(
+                    "[FRIDAY] Warning: Camera thread "
+                    "has not stopped yet."
+                )
+            else:
+                print("[FRIDAY] Camera thread stopped.")
+
+    except Exception as e:
+        print("[FRIDAY] Camera cleanup error:", e)
+
+    # 2. Stop any remaining audio playback.
+    try:
+        tts_stop_event.set()
+        sd.stop()
+    except Exception as e:
+        print("[FRIDAY] Audio playback cleanup:", e)
+
+    # 3. Stop the TTS worker.
+    try:
+        tts.shutdown()
+    except Exception as e:
+        print("[FRIDAY] TTS cleanup:", e)
+
+    # 4. Close the microphone.
+    try:
+        if stream.is_active():
+            stream.stop_stream()
+
+        stream.close()
+
+        print("[FRIDAY] Microphone closed.")
+
+    except Exception as e:
+        print("[FRIDAY] Microphone cleanup error:", e)
+
+    # 5. Release PyAudio.
+    try:
+        p.terminate()
+        print("[FRIDAY] PyAudio released.")
+    except Exception as e:
+        print("[FRIDAY] PyAudio cleanup error:", e)
+
+    # 6. Turn off and close Arduino communication.
+    try:
+        if arduino.is_open:
+            set_mode("OFF")
+            arduino.close()
+
+        print("[FRIDAY] Arduino disconnected.")
+
+    except Exception as e:
+        print("[FRIDAY] Arduino cleanup error:", e)
+
+    print("[FRIDAY] Cleanup finished.")
 
 def enforce_callname(text):
 
@@ -883,11 +972,7 @@ def main():
 
             continue
 
-        if user_input in [
-            "goodbye",
-            "bye",
-            "exit"
-        ]:
+        if user_input in ["goodbye", "bye", "exit"]:
 
             reply = f"Goodbye, {CALLNAME}!"
 
@@ -895,11 +980,14 @@ def main():
 
             set_mode("TALK")
 
+            # Wait for the goodbye message to finish playing.
             tts.speak(reply)
+
+            print("[FRIDAY] Goodbye message finished.")
 
             set_mode("OFF")
 
-            sys.exit(0)
+            return
 
         if MODE not in ["WAKE", "ALWAYS"]:
             continue
@@ -997,14 +1085,19 @@ def main():
 
             set_mode("IDLE")
 
-try:
+if __name__ == "__main__":
 
-    main()
+    try:
+        main()
 
-except KeyboardInterrupt:
+    except KeyboardInterrupt:
+        print("\n[FRIDAY] Interrupted by user.")
 
-    print("\n[FRIDAY] Shutting down...")
+    except Exception as e:
+        print(f"\n[FRIDAY] Unexpected error: {e}")
+        raise
 
-    set_mode("OFF")
+    finally:
+        cleanup()
 
-    sys.exit(0)
+        print("[FRIDAY] Shutdown complete.")
